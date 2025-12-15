@@ -270,14 +270,18 @@ struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store)
 // note: PT is changed, so the TLB need to be invalidate
 static inline void page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep)
 {
-    if (*ptep & PTE_V)
-    {
+    if (*ptep & PTE_V) {
         struct Page *page = pte2page(*ptep);
-        page_ref_dec(page);
-        if (page_ref(page) == 0)
-        {
+
+        if (!(*ptep & PTE_W) && page->cow_ref > 0) {
+            page->cow_ref--;
+        }
+
+        if (page_ref_dec(page) == 0) {
+            assert(page->cow_ref == 0);
             free_page(page);
         }
+        
         *ptep = 0;
         tlb_invalidate(pgdir, la);
     }
@@ -436,7 +440,41 @@ int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end,
     } while (start != 0 && start < end);
     return 0;
 }
+int copy_range_cow(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end)
+{
+    assert(start % PGSIZE == 0 && end % PGSIZE == 0);
+    assert(USER_ACCESS(start, end));
 
+    do
+    {
+        pte_t *parent_ptep = get_pte(from, start, 0);
+        if (parent_ptep == NULL || !(*parent_ptep & PTE_V)) {
+            start = ROUNDDOWN(start + PTSIZE, PTSIZE);
+            continue;
+        }
+
+        struct Page *page = pte2page(*parent_ptep);
+        
+        if ((*parent_ptep & PTE_W) && page->cow_ref == 0) {
+            page->cow_ref = 2;
+            *parent_ptep &= ~PTE_W;
+            tlb_invalidate(from, start);
+        } else if (!(*parent_ptep & PTE_W) && page->cow_ref > 0) {
+            page->cow_ref++;
+        }
+        
+        pte_t *child_ptep = get_pte(to, start, 1);
+        if (child_ptep == NULL) { return -E_NO_MEM; }
+        uint32_t perm = *parent_ptep & PTE_USER;
+        *child_ptep = pte_create(page2ppn(page), (PTE_V | perm) & ~PTE_W);
+        
+        page_ref_inc(page);
+
+        start += PGSIZE;
+    } while (start != 0 && start < end);
+    
+    return 0;
+}
 // page_remove - free an Page which is related linear address la and has an
 // validated pte
 void page_remove(pde_t *pgdir, uintptr_t la)
