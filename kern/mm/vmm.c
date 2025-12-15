@@ -204,11 +204,16 @@ out:
 
 int dup_mmap(struct mm_struct *to, struct mm_struct *from)
 {
+    cprintf(" KERNEL_dup_mmap: 开始为子进程复制/共享父进程的所有VMA...\n");
     assert(to != NULL && from != NULL);
     list_entry_t *list = &(from->mmap_list), *le = list;
     while ((le = list_prev(le)) != list)
     {
-        struct vma_struct *vma, *nvma;
+        // --- 【修正2】先获取vma，再使用它 ---
+        struct vma_struct *vma = le2vma(le, list_link);
+
+        struct vma_struct *nvma;
+        cprintf("    -> 正在处理 VMA [0x%08x, 0x%08x)\n", vma->vm_start, vma->vm_end);
         vma = le2vma(le, list_link);
         nvma = vma_create(vma->vm_start, vma->vm_end, vma->vm_flags);
         if (nvma == NULL)
@@ -218,12 +223,18 @@ int dup_mmap(struct mm_struct *to, struct mm_struct *from)
 
         insert_vma_struct(to, nvma);
 
-        bool share = 0;
-        if (copy_range(to->pgdir, from->pgdir, vma->vm_start, vma->vm_end, share) != 0)
+        // bool share = 0;
+        // if (copy_range(to->pgdir, from->pgdir, vma->vm_start, vma->vm_end, share) != 0)
+        // {
+        //     return -E_NO_MEM;
+        // }
+        // 直接调用我们新的COW函数
+        if (copy_range_cow(to->pgdir, from->pgdir, vma->vm_start, vma->vm_end) != 0)
         {
             return -E_NO_MEM;
         }
     }
+    cprintf(" KERNEL_dup_mmap: 所有VMA处理完毕。\n");
     return 0;
 }
 
@@ -381,4 +392,58 @@ bool user_mem_check(struct mm_struct *mm, uintptr_t addr, size_t len, bool write
         return 1;
     }
     return KERN_ACCESS(addr, addr + len);
+}
+
+int do_pgfault(struct mm_struct *mm, uint32_t cause, uintptr_t addr) {
+    struct vma_struct *vma = find_vma(mm, addr);
+
+    if (vma == NULL || addr < vma->vm_start) {
+        if (addr >= UTEXT && addr < USTACKTOP) {
+            if (mm_map(mm, ROUNDDOWN(addr, PGSIZE), PGSIZE, VM_READ | VM_WRITE, NULL) != 0) {
+                return -1;
+            }
+            vma = find_vma(mm, addr);
+        } else {
+            return -1;
+        }
+    }
+    
+    bool is_write = (cause == CAUSE_STORE_PAGE_FAULT);
+    if (is_write && !(vma->vm_flags & VM_WRITE)) {
+        return -1;
+    }
+
+    uintptr_t aligned_addr = ROUNDDOWN(addr, PGSIZE);
+    pte_t *ptep = get_pte(mm->pgdir, aligned_addr, 1);
+
+    if (ptep == NULL) {
+        return -E_NO_MEM;
+    }
+    
+    if (!(*ptep & PTE_V)) {
+        uint32_t perm = PTE_U;
+        if (vma->vm_flags & VM_READ) { perm |= PTE_R; }
+        if (vma->vm_flags & VM_WRITE) { perm |= PTE_W; }
+        if (pgdir_alloc_page(mm->pgdir, aligned_addr, perm) == NULL) {
+            return -E_NO_MEM;
+        }
+    } else {
+        if (!(*ptep & PTE_W) && is_write) {
+            struct Page *page = pte2page(*ptep);
+            if (page->cow_ref > 0) {
+                if (page->cow_ref > 1) {
+                    struct Page *npage;
+                    if ((npage = alloc_page()) == NULL) { return -E_NO_MEM; }
+                    memcpy(page2kva(npage), page2kva(page), PGSIZE);
+                    page_insert(mm->pgdir, npage, aligned_addr, (*ptep & PTE_USER) | PTE_W);
+                } else {
+                    *ptep |= PTE_W;
+                    tlb_invalidate(mm->pgdir, aligned_addr);
+                    page->cow_ref = 0;
+                }
+            }
+        }
+    }
+    
+    return 0;
 }
