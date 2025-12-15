@@ -245,8 +245,16 @@ MAKEOPTS	:= --quiet --no-print-directory
 run-%: build-%
 	$(V)$(SPIKE) $(UCOREIMG)
 
+# run-nox-%: build-%
+# 	$(V)$(QEMU) -serial mon:stdio $(QEMUOPTS) -nographic
+
 run-nox-%: build-%
-	$(V)$(QEMU) -serial mon:stdio $(QEMUOPTS) -nographic
+	$(V)$(QEMU) \
+		-machine virt \
+		-nographic \
+		-bios default \
+		-device loader,file=$(UCOREIMG),addr=0x80200000
+
 
 build-%: touch
 	$(V)$(MAKE) $(MAKEOPTS) "DEFS+=-DTEST=$* -DTESTSTART=$(RUN_PREFIX)$*_out_start -DTESTSIZE=$(RUN_PREFIX)$*_out_size"
