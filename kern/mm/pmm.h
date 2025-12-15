@@ -50,7 +50,7 @@ void exit_range(pde_t *pgdir, uintptr_t start, uintptr_t end);
 int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end, bool share);
 
 void print_pgdir(void);
-
+int copy_range_cow(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end);
 /* *
  * PADDR - takes a kernel virtual address (an address that points above KERNBASE),
  * where the machine's maximum 256MB of physical memory is mapped and returns the
